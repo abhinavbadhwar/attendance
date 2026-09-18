@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mark Attendance</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #f4f5fb; color: #1a1e33; margin: 0; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 20px; box-sizing: border-box;
+  }
+  .card {
+    background: #fff; border-radius: 16px; padding: 28px; max-width: 380px; width: 100%;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.08);
+  }
+  h2 { margin-top: 0; font-size: 1.2rem; }
+  select, button {
+    width: 100%; padding: 12px; border-radius: 10px; font-size: 1rem; margin-top: 10px;
+    box-sizing: border-box;
+  }
+  select { border: 1px solid #d5d8e5; }
+  button { background: #6366f1; color: #fff; border: none; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #c7c9e6; cursor: not-allowed; }
+  #status { margin-top: 16px; font-size: 0.9rem; line-height: 1.4; }
+  .ok { color: #16a34a; font-weight: 600; }
+  .err { color: #dc2626; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>Mark Yourself Present</h2>
+    <div id="form">
+      <label for="roll">Select your name / roll number</label>
+      <select id="roll"><option>Loading roster…</option></select>
+      <button id="submitBtn" onclick="submitAttendance()">Mark Present</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const sessionId = params.get('session');
+const token = params.get('token');
+const statusEl = document.getElementById('status');
+
+function getDeviceId() {
+  let id = localStorage.getItem('attendanceDeviceId');
+  if (!id) {
+    id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
+    localStorage.setItem('attendanceDeviceId', id);
+  }
+  return id;
+}
+const deviceId = getDeviceId();
+
+if (!sessionId || !token) {
+  statusEl.innerHTML = '<span class="err">Invalid link. Please scan the QR code shown on the classroom screen.</span>';
+  document.getElementById('form').style.display = 'none';
+}
+
+async function loadRoster() {
+  try {
+    const res = await fetch('/api/roster-lite');
+    const roster = await res.json();
+    const sel = document.getElementById('roll');
+    sel.innerHTML = roster
+      .map(r => `<option value="${r.rollNumber}">${r.name} (${r.rollNumber})</option>`)
+      .join('');
+  } catch (e) {
+    statusEl.innerHTML = '<span class="err">Could not load class roster.</span>';
+  }
+}
+if (sessionId && token) loadRoster();
+
+async function submitAttendance() {
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  statusEl.textContent = 'Submitting…';
+  const rollNumber = document.getElementById('roll').value;
+  try {
+    const res = await fetch('/api/attend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, token, rollNumber, deviceId }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      statusEl.innerHTML = `<span class="ok">✓ Marked present — ${data.name}</span>`;
+      document.getElementById('form').style.display = 'none';
+    } else {
+      statusEl.innerHTML = `<span class="err">${data.reason}</span>`;
+      btn.disabled = false;
+    }
+  } catch (e) {
+    statusEl.innerHTML = '<span class="err">Network error. Please try again.</span>';
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>

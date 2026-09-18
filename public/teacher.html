@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Teacher — Attendance QR</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0f1220; color: #f0f0f5; margin: 0;
+    display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 24px;
+    box-sizing: border-box;
+  }
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 4px; }
+  .sub { color: #9aa0b4; margin-bottom: 20px; font-size: 0.9rem; }
+  .card {
+    background: #1a1e33; border-radius: 16px; padding: 28px; max-width: 440px; width: 100%;
+    text-align: center; box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+  }
+  #qrWrap { background: #fff; border-radius: 12px; padding: 16px; display: inline-block; margin: 16px 0; }
+  #qrWrap img { display: block; width: 280px; height: 280px; }
+  .qr-age { font-size: 0.8rem; color: #9aa0b4; margin-top: -8px; margin-bottom: 12px; }
+  button {
+    font-size: 1rem; padding: 12px 22px; border-radius: 10px; border: none; cursor: pointer;
+    font-weight: 600; margin: 6px;
+  }
+  .start { background: #6ee7b7; color: #0f1220; }
+  .end { background: #f87171; color: #0f1220; }
+  .secondary { background: #2a2f4a; color: #f0f0f5; font-size: 0.85rem; padding: 8px 16px; }
+  .stats { display: flex; justify-content: space-around; margin: 16px 0; }
+  .stat { text-align: center; }
+  .stat .num { font-size: 1.8rem; font-weight: 700; }
+  .stat .label { font-size: 0.75rem; color: #9aa0b4; }
+  #presentList { text-align: left; max-height: 160px; overflow-y: auto; font-size: 0.85rem; color: #cdd1e0; }
+  #proxyFlags { text-align: left; margin-top: 12px; }
+  .proxy-warning {
+    background: #3a1a1a; border: 1px solid #f87171; border-radius: 8px; padding: 10px 12px;
+    font-size: 0.8rem; color: #fca5a5; margin-top: 6px;
+  }
+  #msg { color: #f87171; font-size: 0.85rem; min-height: 18px; }
+
+  .roster-panel { margin-top: 20px; text-align: left; border-top: 1px solid #2a2f4a; padding-top: 16px; }
+  .roster-panel summary { cursor: pointer; font-weight: 600; font-size: 0.9rem; color: #cdd1e0; }
+  .tabs { display: flex; gap: 8px; margin-top: 12px; }
+  .tab-btn {
+    flex: 1; padding: 8px; margin: 0; font-size: 0.8rem; background: #12152a; color: #9aa0b4; border-radius: 8px;
+  }
+  .tab-btn.active { background: #6366f1; color: #fff; }
+  .tab-content { display: none; margin-top: 10px; }
+  .tab-content.active { display: block; }
+  .roster-row { display: flex; gap: 8px; }
+  .roster-row input {
+    flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid #2a2f4a;
+    background-color: #12152a; color: #f0f0f5; font-size: 0.85rem;
+  }
+  .roster-row button { padding: 8px 14px; margin: 0; font-size: 0.85rem; background: #6366f1; color: #fff; }
+  textarea#bulkInput {
+    width: 100%; box-sizing: border-box; min-height: 110px; border-radius: 8px; border: 1px solid #2a2f4a;
+    background-color: #12152a; color: #f0f0f5; font-size: 0.85rem; padding: 10px; font-family: monospace;
+    resize: vertical;
+  }
+  .bulk-hint { font-size: 0.75rem; color: #9aa0b4; margin: 6px 0; }
+  #rosterList { margin-top: 12px; max-height: 180px; overflow-y: auto; font-size: 0.85rem; }
+  .roster-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 0; border-bottom: 1px solid #2a2f4a; color: #cdd1e0;
+  }
+  .roster-item button {
+    background: transparent; color: #f87171; border: none; padding: 2px 8px; font-size: 0.8rem; width: auto;
+  }
+  #rosterMsg, #bulkMsg { font-size: 0.8rem; min-height: 16px; margin-top: 4px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>Live Attendance</h1>
+  <div class="sub">Attendance requires being on the classroom WiFi and physically in the room</div>
+
+  <div class="card">
+    <div id="idle">
+      <button class="start" onclick="startSession()">Start Attendance Session</button>
+
+      <details class="roster-panel" id="rosterPanel">
+        <summary>Manage Class Roster</summary>
+
+        <div class="tabs">
+          <button class="tab-btn active" id="tabSingleBtn" onclick="showTab('single')">Add one</button>
+          <button class="tab-btn" id="tabBulkBtn" onclick="showTab('bulk')">Paste a list</button>
+        </div>
+
+        <div class="tab-content active" id="tabSingle">
+          <div class="roster-row" style="margin-top:10px;">
+            <input id="newRoll" placeholder="Roll number" />
+            <input id="newName" placeholder="Student name" />
+            <button onclick="addStudent()">Add</button>
+          </div>
+          <div id="rosterMsg"></div>
+        </div>
+
+        <div class="tab-content" id="tabBulk">
+          <div class="bulk-hint">One student per line: <code>rollNumber, Name</code></div>
+          <textarea id="bulkInput" placeholder="101, Aarav Sharma&#10;102, Diya Patel&#10;103, Rohan Mehta"></textarea>
+          <button onclick="addBulk()" style="width:100%; margin-top:8px;">Add All</button>
+          <div id="bulkMsg"></div>
+        </div>
+
+        <div id="rosterList"></div>
+      </details>
+    </div>
+
+    <div id="live" style="display:none;">
+      <div id="qrWrap"><img id="qrImg" alt="attendance QR" /></div>
+      <div class="qr-age" id="qrAge"></div>
+      <button class="secondary" onclick="regenerateQr()">Regenerate QR</button>
+
+      <div class="stats">
+        <div class="stat"><div class="num" id="presentCount">0</div><div class="label">Present</div></div>
+        <div class="stat"><div class="num" id="totalCount">0</div><div class="label">Total</div></div>
+      </div>
+
+      <div id="presentList"></div>
+      <div id="proxyFlags"></div>
+      <button class="end" onclick="endSession()">End Session</button>
+    </div>
+
+    <div id="summary" style="display:none; text-align:left;"></div>
+    <div id="msg"></div>
+  </div>
+
+<script>
+let statusPoll = null;
+
+// ---------- Roster tabs ----------
+function showTab(which) {
+  document.getElementById('tabSingle').classList.toggle('active', which === 'single');
+  document.getElementById('tabBulk').classList.toggle('active', which === 'bulk');
+  document.getElementById('tabSingleBtn').classList.toggle('active', which === 'single');
+  document.getElementById('tabBulkBtn').classList.toggle('active', which === 'bulk');
+}
+
+// ---------- Roster management ----------
+async function loadRosterPanel() {
+  const listEl = document.getElementById('rosterList');
+  listEl.innerHTML = 'Loading…';
+  try {
+    const res = await fetch('/api/roster');
+    const roster = await res.json();
+    if (!res.ok) {
+      listEl.innerHTML = '';
+      document.getElementById('rosterMsg').textContent = roster.error || 'Could not load roster.';
+      return;
+    }
+    listEl.innerHTML = roster.length
+      ? roster.map(r => `
+          <div class="roster-item">
+            <span>${r.name} (${r.rollNumber})</span>
+            <button onclick="removeStudent('${r.rollNumber}')">Remove</button>
+          </div>`).join('')
+      : '<div style="color:#9aa0b4;">No students yet. Add some above.</div>';
+  } catch (e) {
+    listEl.innerHTML = '';
+    document.getElementById('rosterMsg').textContent = 'Network error loading roster.';
+  }
+}
+
+async function addStudent() {
+  const rollNumber = document.getElementById('newRoll').value.trim();
+  const name = document.getElementById('newName').value.trim();
+  const msgEl = document.getElementById('rosterMsg');
+  if (!rollNumber || !name) {
+    msgEl.textContent = 'Enter both a roll number and a name.';
+    return;
+  }
+  msgEl.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/roster', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rollNumber, name }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msgEl.textContent = data.error || 'Could not add student.';
+      return;
+    }
+    msgEl.textContent = 'Added.';
+    document.getElementById('newRoll').value = '';
+    document.getElementById('newName').value = '';
+    loadRosterPanel();
+  } catch (e) {
+    msgEl.textContent = 'Network error — check the server is running and Firebase is configured.';
+  }
+}
+
+async function addBulk() {
+  const raw = document.getElementById('bulkInput').value;
+  const msgEl = document.getElementById('bulkMsg');
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    msgEl.textContent = 'Paste at least one line like "101, Aarav Sharma".';
+    return;
+  }
+  const students = lines.map(line => {
+    const [rollNumber, ...rest] = line.split(',');
+    return { rollNumber: (rollNumber || '').trim(), name: rest.join(',').trim() };
+  });
+  msgEl.textContent = 'Saving ' + students.length + ' students…';
+  try {
+    const res = await fetch('/api/roster/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ students }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msgEl.textContent = data.error || 'Bulk add failed.';
+      return;
+    }
+    const failed = data.results.filter(r => !r.ok);
+    const okCount = data.results.length - failed.length;
+    msgEl.textContent = okCount + ' added.' + (failed.length
+      ? '\nFailed: ' + failed.map(f => `${f.rollNumber || '(blank)'} — ${f.error}`).join('; ')
+      : '');
+    if (okCount > 0) {
+      document.getElementById('bulkInput').value = failed.length
+        ? lines.filter((_, i) => !data.results[i].ok).join('\n')
+        : '';
+    }
+    loadRosterPanel();
+  } catch (e) {
+    msgEl.textContent = 'Network error — check the server is running and Firebase is configured.';
+  }
+}
+
+async function removeStudent(rollNumber) {
+  await fetch('/api/roster/' + encodeURIComponent(rollNumber), { method: 'DELETE' });
+  loadRosterPanel();
+}
+
+document.getElementById('rosterPanel').addEventListener('toggle', (e) => {
+  if (e.target.open) loadRosterPanel();
+});
+
+// ---------- Session ----------
+async function startSession() {
+  document.getElementById('msg').textContent = '';
+  const res = await fetch('/api/session/start', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) {
+    document.getElementById('msg').textContent = data.error || 'Could not start session.';
+    return;
+  }
+  document.getElementById('idle').style.display = 'none';
+  document.getElementById('summary').style.display = 'none';
+  document.getElementById('live').style.display = 'block';
+  document.getElementById('totalCount').textContent = data.studentCount;
+  await loadQr();
+  statusPoll = setInterval(refreshStatus, 3000);
+}
+
+async function loadQr() {
+  const res = await fetch('/api/session/qr');
+  if (!res.ok) return;
+  const data = await res.json();
+  document.getElementById('qrImg').src = data.qrImage;
+  applyStatus(data);
+}
+
+async function refreshStatus() {
+  const res = await fetch('/api/session/status');
+  if (!res.ok) return;
+  applyStatus(await res.json());
+}
+
+function applyStatus(data) {
+  document.getElementById('presentCount').textContent = data.presentCount;
+  document.getElementById('totalCount').textContent = data.totalCount;
+  document.getElementById('presentList').innerHTML = data.presentList.map(n => '✓ ' + n).join('<br/>');
+  const ageSec = data.tokenAgeMs != null ? Math.floor(data.tokenAgeMs / 1000) : null;
+  document.getElementById('qrAge').textContent = ageSec != null ? `QR generated ${ageSec}s ago` : '';
+
+  const flags = data.proxyFlags || [];
+  document.getElementById('proxyFlags').innerHTML = flags.length
+    ? '<b style="color:#fca5a5;">⚠️ Possible proxy attempts</b>' +
+      flags.map(f =>
+        `<div class="proxy-warning">A phone that already checked in <b>${f.alreadyClaimedName}</b> then tried to check in <b>${f.triedName}</b> too.</div>`
+      ).join('')
+    : '';
+}
+
+async function regenerateQr() {
+  await fetch('/api/session/qr/regenerate', { method: 'POST' });
+  await loadQr();
+}
+
+async function endSession() {
+  clearInterval(statusPoll);
+  const res = await fetch('/api/session/end', { method: 'POST' });
+  const data = await res.json();
+  document.getElementById('live').style.display = 'none';
+  document.getElementById('idle').style.display = 'block';
+  const summary = document.getElementById('summary');
+  summary.style.display = 'block';
+  const flags = data.proxyFlags || [];
+  const flagsHtml = flags.length
+    ? '<br/><br/><b style="color:#f87171;">⚠️ Possible proxy attempts this session:</b>' +
+      flags.map(f =>
+        `<div class="proxy-warning">A phone that already checked in <b>${f.alreadyClaimedName}</b> then tried to check in <b>${f.triedName}</b> too.</div>`
+      ).join('')
+    : '';
+  summary.innerHTML = `
+    <h3>Session ended</h3>
+    <b>Present (${data.present.length}):</b><br/>${data.present.join(', ') || '—'}<br/><br/>
+    <b>Absent (${data.absent.length}):</b><br/>${data.absent.join(', ') || '—'}
+    ${flagsHtml}
+  `;
+}
+</script>
+</body>
+</html>
