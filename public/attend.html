@@ -16,21 +16,36 @@
     box-shadow: 0 8px 30px rgba(0,0,0,0.08);
   }
   h2 { margin-top: 0; font-size: 1.2rem; }
-  select, button {
+  select, button, a.btn {
     width: 100%; padding: 12px; border-radius: 10px; font-size: 1rem; margin-top: 10px;
-    box-sizing: border-box;
+    box-sizing: border-box; display: block; text-align: center; text-decoration: none;
   }
   select { border: 1px solid #d5d8e5; }
-  button { background: #6366f1; color: #fff; border: none; font-weight: 600; cursor: pointer; }
+  button, a.btn { background: #6366f1; color: #fff; border: none; font-weight: 600; cursor: pointer; }
   button:disabled { background: #c7c9e6; cursor: not-allowed; }
   #status { margin-top: 16px; font-size: 0.9rem; line-height: 1.4; }
   .ok { color: #16a34a; font-weight: 600; }
   .err { color: #dc2626; font-weight: 600; }
+  .warn-box {
+    background: #fff7ed; border: 1px solid #fb923c; border-radius: 10px; padding: 16px;
+    font-size: 0.9rem; line-height: 1.5; color: #7c2d12;
+  }
+  .warn-box b { display: block; margin-bottom: 6px; }
 </style>
 </head>
 <body>
   <div class="card">
     <h2>Mark Yourself Present</h2>
+
+    <div id="inAppWarning" style="display:none;">
+      <div class="warn-box">
+        <b>⚠️ Please open this in Safari</b>
+        This page was opened inside another app, which can't reliably record attendance. Tap below to continue in Safari.
+      </div>
+      <a class="btn" id="openSafariBtn" href="#">Open in Safari</a>
+      <a class="btn" id="copyLinkBtn" href="#" style="background:#2a2f4a; display:none;">Copy Link Instead</a>
+    </div>
+
     <div id="form">
       <label for="roll">Select your name / roll number</label>
       <select id="roll"><option>Loading roster…</option></select>
@@ -55,6 +70,52 @@ function getDeviceId() {
 }
 const deviceId = getDeviceId();
 
+// ---------- In-app browser detection ----------
+// Apps like Instagram, Facebook, WhatsApp (on some platforms), TikTok, etc. can
+// open links in their own mini-browser instead of real Safari/Chrome. These
+// often don't reliably persist localStorage between opens, which breaks the
+// "one phone, one check-in" protection. Detect and block until the student
+// switches to their real browser.
+function isLikelyInAppBrowser() {
+  const ua = navigator.userAgent || '';
+  const knownApps = /FBAN|FBAV|Instagram|Line\/|MicroMessenger|TikTok|musical_ly|Twitter|Pinterest|LinkedInApp|Snapchat|GSA\//i;
+  if (knownApps.test(ua)) return true;
+  const isIOS = /iPhone|iPad|iPod/.test(ua);
+  const hasSafariToken = /Safari\//.test(ua);
+  // Real Safari on iOS always includes "Safari/" in its user agent string;
+  // most in-app WebView browsers on iOS omit it.
+  if (isIOS && !hasSafariToken) return true;
+  return false;
+}
+
+function setupInAppWarning() {
+  const currentUrl = window.location.href;
+  const safariUrl = currentUrl.replace(/^https?:\/\//, (m) => 'x-safari-' + m);
+  const openBtn = document.getElementById('openSafariBtn');
+  const copyBtn = document.getElementById('copyLinkBtn');
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent || '');
+
+  if (isIOS) {
+    openBtn.href = safariUrl;
+  } else {
+    openBtn.style.display = 'none';
+    copyBtn.style.display = 'block';
+    copyBtn.onclick = (e) => {
+      e.preventDefault();
+      navigator.clipboard.writeText(currentUrl).then(() => {
+        copyBtn.textContent = 'Link copied — paste it in Chrome';
+      });
+    };
+  }
+
+  document.getElementById('inAppWarning').style.display = 'block';
+  document.getElementById('form').style.display = 'none';
+}
+
+if (isLikelyInAppBrowser()) {
+  setupInAppWarning();
+}
+
 if (!sessionId || !token) {
   statusEl.innerHTML = '<span class="err">Invalid link. Please scan the QR code shown on the classroom screen.</span>';
   document.getElementById('form').style.display = 'none';
@@ -72,7 +133,7 @@ async function loadRoster() {
     statusEl.innerHTML = '<span class="err">Could not load class roster.</span>';
   }
 }
-if (sessionId && token) loadRoster();
+if (sessionId && token && !isLikelyInAppBrowser()) loadRoster();
 
 async function submitAttendance() {
   const btn = document.getElementById('submitBtn');
