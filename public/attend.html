@@ -17,7 +17,7 @@
   }
   h2 { margin-top: 0; font-size: 1.2rem; }
   select, button, a.btn {
-    width: 100%; padding: 12px; border-radius: 10px; font-size: 1rem; margin-top: 10px;
+    width: 100%; padding: 14px; border-radius: 10px; font-size: 1rem; margin-top: 10px;
     box-sizing: border-box; display: block; text-align: center; text-decoration: none;
   }
   select { border: 1px solid #d5d8e5; }
@@ -26,27 +26,28 @@
   #status { margin-top: 16px; font-size: 0.9rem; line-height: 1.4; }
   .ok { color: #16a34a; font-weight: 600; }
   .err { color: #dc2626; font-weight: 600; }
-  .warn-box {
-    background: #fff7ed; border: 1px solid #fb923c; border-radius: 10px; padding: 16px;
-    font-size: 0.9rem; line-height: 1.5; color: #7c2d12;
+  .gate-box {
+    background: #eff6ff; border: 1px solid #93c5fd; border-radius: 10px; padding: 16px;
+    font-size: 0.9rem; line-height: 1.5; color: #1e3a8a;
   }
-  .warn-box b { display: block; margin-bottom: 6px; }
+  .gate-box b { display: block; margin-bottom: 6px; }
+  .hint { font-size: 0.75rem; color: #6b7280; margin-top: 10px; text-align: center; }
 </style>
 </head>
 <body>
   <div class="card">
     <h2>Mark Yourself Present</h2>
 
-    <div id="inAppWarning" style="display:none;">
-      <div class="warn-box">
-        <b>⚠️ Please open this in Safari</b>
-        This page was opened inside another app, which can't reliably record attendance. Tap below to continue in Safari.
+    <div id="gate">
+      <div class="gate-box">
+        <b>One more tap needed</b>
+        For attendance to work correctly, this needs to open in your regular browser (not a quick preview). Tap below to continue.
       </div>
-      <a class="btn" id="openSafariBtn" href="#">Open in Safari</a>
-      <a class="btn" id="copyLinkBtn" href="#" style="background:#2a2f4a; display:none;">Copy Link Instead</a>
+      <a class="btn" id="continueBtn" href="#">Continue in Safari</a>
+      <div class="hint" id="gateHint"></div>
     </div>
 
-    <div id="form">
+    <div id="form" style="display:none;">
       <label for="roll">Select your name / roll number</label>
       <select id="roll"><option>Loading roster…</option></select>
       <button id="submitBtn" onclick="submitAttendance()">Mark Present</button>
@@ -58,6 +59,7 @@
 const params = new URLSearchParams(window.location.search);
 const sessionId = params.get('session');
 const token = params.get('token');
+const alreadyGated = params.get('safari') === '1';
 const statusEl = document.getElementById('status');
 
 function getDeviceId() {
@@ -68,96 +70,83 @@ function getDeviceId() {
   }
   return id;
 }
-const deviceId = getDeviceId();
 
-// ---------- In-app browser detection ----------
-// Apps like Instagram, Facebook, WhatsApp (on some platforms), TikTok, etc. can
-// open links in their own mini-browser instead of real Safari/Chrome. These
-// often don't reliably persist localStorage between opens, which breaks the
-// "one phone, one check-in" protection. Detect and block until the student
-// switches to their real browser.
-function isLikelyInAppBrowser() {
-  const ua = navigator.userAgent || '';
-  const knownApps = /FBAN|FBAV|Instagram|Line\/|MicroMessenger|TikTok|musical_ly|Twitter|Pinterest|LinkedInApp|Snapchat|GSA\//i;
-  if (knownApps.test(ua)) return true;
-  const isIOS = /iPhone|iPad|iPod/.test(ua);
-  const hasSafariToken = /Safari\//.test(ua);
-  // Real Safari on iOS always includes "Safari/" in its user agent string;
-  // most in-app WebView browsers on iOS omit it.
-  if (isIOS && !hasSafariToken) return true;
-  return false;
-}
-
-function setupInAppWarning() {
-  const currentUrl = window.location.href;
-  const safariUrl = currentUrl.replace(/^https?:\/\//, (m) => 'x-safari-' + m);
-  const openBtn = document.getElementById('openSafariBtn');
-  const copyBtn = document.getElementById('copyLinkBtn');
+function buildGateLinks() {
+  const url = new URL(window.location.href);
+  url.searchParams.set('safari', '1');
+  const target = url.toString();
   const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent || '');
+  const isAndroid = /Android/.test(navigator.userAgent || '');
+  const btn = document.getElementById('continueBtn');
+  const hint = document.getElementById('gateHint');
 
   if (isIOS) {
-    openBtn.href = safariUrl;
+    // Forces a hand-off to the real, standalone Safari app -- not whatever
+    // quick preview or in-app browser this link was opened in.
+    btn.href = target.replace(/^https?:\/\//, (m) => 'x-safari-' + m);
+    hint.textContent = 'This opens Safari.';
+  } else if (isAndroid) {
+    // Forces a hand-off to Chrome specifically on Android.
+    btn.href = 'intent://' + target.replace(/^https?:\/\//, '') + '#Intent;scheme=https;package=com.android.chrome;end;';
+    hint.textContent = 'This opens Chrome. If nothing happens, copy this page\'s link and paste it into Chrome manually.';
   } else {
-    openBtn.style.display = 'none';
-    copyBtn.style.display = 'block';
-    copyBtn.onclick = (e) => {
-      e.preventDefault();
-      navigator.clipboard.writeText(currentUrl).then(() => {
-        copyBtn.textContent = 'Link copied — paste it in Chrome';
-      });
-    };
+    btn.href = target;
+    hint.textContent = '';
   }
-
-  document.getElementById('inAppWarning').style.display = 'block';
-  document.getElementById('form').style.display = 'none';
-}
-
-if (isLikelyInAppBrowser()) {
-  setupInAppWarning();
 }
 
 if (!sessionId || !token) {
+  document.getElementById('gate').style.display = 'none';
   statusEl.innerHTML = '<span class="err">Invalid link. Please scan the QR code shown on the classroom screen.</span>';
-  document.getElementById('form').style.display = 'none';
+} else if (!alreadyGated) {
+  buildGateLinks();
+} else {
+  startCheckInFlow();
 }
 
-async function loadRoster() {
-  try {
-    const res = await fetch('/api/roster-lite');
-    const roster = await res.json();
-    const sel = document.getElementById('roll');
-    sel.innerHTML = roster
-      .map(r => `<option value="${r.rollNumber}">${r.name} (${r.rollNumber})</option>`)
-      .join('');
-  } catch (e) {
-    statusEl.innerHTML = '<span class="err">Could not load class roster.</span>';
+function startCheckInFlow() {
+  document.getElementById('gate').style.display = 'none';
+  document.getElementById('form').style.display = 'block';
+  const deviceId = getDeviceId();
+  loadRoster();
+
+  async function loadRoster() {
+    try {
+      const res = await fetch('/api/roster-lite');
+      const roster = await res.json();
+      const sel = document.getElementById('roll');
+      sel.innerHTML = roster
+        .map(r => `<option value="${r.rollNumber}">${r.name} (${r.rollNumber})</option>`)
+        .join('');
+    } catch (e) {
+      statusEl.innerHTML = '<span class="err">Could not load class roster.</span>';
+    }
   }
-}
-if (sessionId && token && !isLikelyInAppBrowser()) loadRoster();
 
-async function submitAttendance() {
-  const btn = document.getElementById('submitBtn');
-  btn.disabled = true;
-  statusEl.textContent = 'Submitting…';
-  const rollNumber = document.getElementById('roll').value;
-  try {
-    const res = await fetch('/api/attend', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, token, rollNumber, deviceId }),
-    });
-    const data = await res.json();
-    if (data.ok) {
-      statusEl.innerHTML = `<span class="ok">✓ Marked present — ${data.name}</span>`;
-      document.getElementById('form').style.display = 'none';
-    } else {
-      statusEl.innerHTML = `<span class="err">${data.reason}</span>`;
+  window.submitAttendance = async function submitAttendance() {
+    const btn = document.getElementById('submitBtn');
+    btn.disabled = true;
+    statusEl.textContent = 'Submitting…';
+    const rollNumber = document.getElementById('roll').value;
+    try {
+      const res = await fetch('/api/attend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, token, rollNumber, deviceId }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        statusEl.innerHTML = `<span class="ok">✓ Marked present — ${data.name}</span>`;
+        document.getElementById('form').style.display = 'none';
+      } else {
+        statusEl.innerHTML = `<span class="err">${data.reason}</span>`;
+        btn.disabled = false;
+      }
+    } catch (e) {
+      statusEl.innerHTML = '<span class="err">Network error. Please try again.</span>';
       btn.disabled = false;
     }
-  } catch (e) {
-    statusEl.innerHTML = '<span class="err">Network error. Please try again.</span>';
-    btn.disabled = false;
-  }
+  };
 }
 </script>
 </body>
