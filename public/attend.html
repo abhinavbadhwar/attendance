@@ -57,6 +57,8 @@
 
 <script>
 const params = new URLSearchParams(window.location.search);
+const teacherId = params.get('t');
+const classId = params.get('c');
 const sessionId = params.get('session');
 const token = params.get('token');
 const alreadyGated = params.get('safari') === '1';
@@ -81,21 +83,18 @@ function buildGateLinks() {
   const hint = document.getElementById('gateHint');
 
   if (isIOS) {
-    // Forces a hand-off to the real, standalone Safari app -- not whatever
-    // quick preview or in-app browser this link was opened in.
     btn.href = target.replace(/^https?:\/\//, (m) => 'x-safari-' + m);
     hint.textContent = 'This opens Safari.';
   } else if (isAndroid) {
-    // Forces a hand-off to Chrome specifically on Android.
     btn.href = 'intent://' + target.replace(/^https?:\/\//, '') + '#Intent;scheme=https;package=com.android.chrome;end;';
-    hint.textContent = 'This opens Chrome. If nothing happens, copy this page\'s link and paste it into Chrome manually.';
+    hint.textContent = "This opens Chrome. If nothing happens, copy this page's link and paste it into Chrome manually.";
   } else {
     btn.href = target;
     hint.textContent = '';
   }
 }
 
-if (!sessionId || !token) {
+if (!teacherId || !classId || !sessionId || !token) {
   document.getElementById('gate').style.display = 'none';
   statusEl.innerHTML = '<span class="err">Invalid link. Please scan the QR code shown on the classroom screen.</span>';
 } else if (!alreadyGated) {
@@ -112,7 +111,7 @@ function startCheckInFlow() {
 
   async function loadRoster() {
     try {
-      const res = await fetch('/api/roster-lite');
+      const res = await fetch(`/api/roster-lite?t=${encodeURIComponent(teacherId)}&c=${encodeURIComponent(classId)}`);
       const roster = await res.json();
       const sel = document.getElementById('roll');
       sel.innerHTML = roster
@@ -132,7 +131,7 @@ function startCheckInFlow() {
       const res = await fetch('/api/attend', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, token, rollNumber, deviceId }),
+        body: JSON.stringify({ teacherId, classId, sessionId, token, rollNumber, deviceId }),
       });
       const data = await res.json();
       if (data.ok) {

@@ -1,52 +1,57 @@
 /**
- * Holds the state of the currently-live attendance session (there's one class at a
- * time in this simple model — extend to a Map<sessionId, state> for multiple
- * simultaneous classes/rooms).
+ * Holds the state of every currently-live attendance session, keyed by
+ * "teacherId:classId" -- so different teachers, or one teacher's different
+ * classes, each get their own independent QR/roster/device-lock state and
+ * never interfere with each other.
  *
- * Anti-sharing layers:
- *   1. Roster check     -> only a roll number in this class's roster can be used.
- *   2. Network check    -> checked in server.js: request must come from the
- *                          classroom's WiFi (matching a configured public IP).
- *   3. One-time-per-roll -> each roll number can only be marked present ONCE
- *                          per day. This is seeded from Firestore on session
- *                          start, so restarting the session mid-day never
- *                          resets it.
- *   4. Device lock + proxy flagging -> each scanning device (phone) can only
- *                          ever be used to mark ONE roll number present per
- *                          day. This is also seeded from Firestore on session
- *                          start for the same reason. Any attempt to reuse a
- *                          device for a second student is BLOCKED and logged
- *                          to proxyFlags, visible live to the teacher.
- *   5. Session lifetime -> the QR/token is only valid while the teacher's
- *                          session is active; ending the session invalidates
- *                          it entirely.
- *
- * The token itself is generated once per session (or on-demand via
- * `regenerateToken`, e.g. if a teacher suspects a leak) rather than rotating
- * automatically on a timer.
+ * Anti-sharing layers (per class):
+ *   1. Roster check      -> only a roll number in that class's roster can be used.
+ *   2. Network check     -> checked in server.js: request must come from the
+ *                           classroom's WiFi, if ALLOWED_NETWORK_IPS is set.
+ *   3. Rotating QR       -> the QR's token refreshes every ROTATE_MS. A photo
+ *                           of it stops working shortly after. The PREVIOUS
+ *                           token also stays valid for one more cycle (a
+ *                           grace window) so an in-progress check-in isn't
+ *                           rejected just because the display refreshed.
+ *   4. One-time-per-roll -> each roll number can only be marked present ONCE
+ *                           per day. Seeded from Firestore on session start.
+ *   5. Device lock + proxy flagging -> each phone can only ever be used to
+ *                           mark ONE roll number present per day (also
+ *                           seeded from Firestore). Reuse attempts are
+ *                           BLOCKED and logged, visible live to the teacher.
+ *   6. Session lifetime  -> the QR is only valid while that class's session
+ *                           is active.
  */
 
 const { nanoid } = require('nanoid');
 
-const state = {
-  sessionId: null,
-  active: false,
-  currentToken: null,
-  tokenIssuedAt: null,
-  dateStr: null,
-  roster: [], // [{rollNumber, name}]
-  presentRollNumbers: new Set(),
-  deviceRollMap: new Map(), // deviceId -> rollNumber already claimed by that device (today)
-  proxyFlags: [], // [{ triedRollNumber, triedName, alreadyClaimedRollNumber, alreadyClaimedName, timestamp }]
-};
+const ROTATE_MS = Number(process.env.TOKEN_ROTATE_SECONDS || 30) * 1000;
 
-/**
- * Starts (or resumes) today's session.
- * presentRollNumbers and deviceClaims come from Firestore (via
- * firebase.ensureSessionDoc) so that restarting the session mid-day resumes
- * with the correct protections already in place, instead of resetting them.
- */
-function startSession({ dateStr, roster, presentRollNumbers = [], deviceClaims = {} }) {
+const sessions = new Map(); // key -> state object
+
+function freshState() {
+  return {
+    sessionId: null,
+    active: false,
+    currentToken: null,
+    previousToken: null,
+    tokenIssuedAt: null,
+    rotateTimer: null,
+    dateStr: null,
+    roster: [],
+    presentRollNumbers: new Set(),
+    deviceRollMap: new Map(),
+    proxyFlags: [],
+  };
+}
+
+function getState(key) {
+  if (!sessions.has(key)) sessions.set(key, freshState());
+  return sessions.get(key);
+}
+
+function startSession(key, { dateStr, roster, presentRollNumbers = [], deviceClaims = {} }) {
+  const state = getState(key);
   state.sessionId = nanoid(10);
   state.active = true;
   state.dateStr = dateStr;
@@ -54,19 +59,24 @@ function startSession({ dateStr, roster, presentRollNumbers = [], deviceClaims =
   state.presentRollNumbers = new Set(presentRollNumbers);
   state.deviceRollMap = new Map(Object.entries(deviceClaims));
   state.proxyFlags = [];
-  regenerateToken();
+  state.previousToken = null;
+  rotateToken(key);
+  clearInterval(state.rotateTimer);
+  state.rotateTimer = setInterval(() => rotateToken(key), ROTATE_MS);
   return state.sessionId;
 }
 
-/** Generates a fresh token. Called on session start, and optionally on demand
- *  by the teacher (e.g. "Regenerate QR" button) if a leak is suspected. */
-function regenerateToken() {
+function rotateToken(key) {
+  const state = getState(key);
+  state.previousToken = state.currentToken;
   state.currentToken = nanoid(24);
   state.tokenIssuedAt = Date.now();
   return state.currentToken;
 }
 
-function endSession() {
+function endSession(key) {
+  const state = getState(key);
+  clearInterval(state.rotateTimer);
   const summary = {
     sessionId: state.sessionId,
     dateStr: state.dateStr,
@@ -76,11 +86,13 @@ function endSession() {
   };
   state.active = false;
   state.currentToken = null;
+  state.previousToken = null;
   state.sessionId = null;
   return summary;
 }
 
-function getStatus() {
+function getStatus(key) {
+  const state = getState(key);
   return {
     active: state.active,
     sessionId: state.sessionId,
@@ -90,21 +102,24 @@ function getStatus() {
       .filter((r) => state.presentRollNumbers.has(r.rollNumber))
       .map((r) => r.name),
     tokenAgeMs: state.tokenIssuedAt ? Date.now() - state.tokenIssuedAt : null,
+    rotateMs: ROTATE_MS,
     proxyFlags: state.proxyFlags,
   };
 }
 
-/**
- * Validates a scan attempt. Returns { ok: boolean, reason?: string, student?, proxyFlag? }.
- * The network-IP check happens in server.js (it needs request-level data this
- * module doesn't have); everything else funnels through here.
- */
-function validateScan({ sessionId, token, rollNumber, deviceId }) {
+function validateScan(key, { sessionId, token, rollNumber, deviceId }) {
+  const state = getState(key);
   if (!state.active) {
     return { ok: false, reason: 'No attendance session is currently open.' };
   }
-  if (sessionId !== state.sessionId || token !== state.currentToken) {
-    return { ok: false, reason: 'This QR code is invalid or from a different session. Please scan the code currently on screen.' };
+  if (sessionId !== state.sessionId) {
+    return { ok: false, reason: 'This QR code is from a different session. Please scan the code currently on screen.' };
+  }
+  if (token !== state.currentToken && token !== state.previousToken) {
+    return {
+      ok: false,
+      reason: 'This QR code has expired (it refreshes automatically). Please scan the code currently on screen.',
+    };
   }
   if (!deviceId) {
     return { ok: false, reason: 'Could not identify this device. Please reload the page and try again.' };
@@ -139,13 +154,14 @@ function validateScan({ sessionId, token, rollNumber, deviceId }) {
   return { ok: true, student };
 }
 
-function markScanSuccessful(rollNumber, deviceId) {
+function markScanSuccessful(key, rollNumber, deviceId) {
+  const state = getState(key);
   state.presentRollNumbers.add(rollNumber);
   state.deviceRollMap.set(deviceId, rollNumber);
 }
 
-function getRawState() {
-  return state;
+function getRawState(key) {
+  return getState(key);
 }
 
 module.exports = {
@@ -154,6 +170,6 @@ module.exports = {
   getStatus,
   validateScan,
   markScanSuccessful,
-  regenerateToken,
+  rotateToken,
   getRawState,
 };

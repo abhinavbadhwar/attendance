@@ -1,7 +1,7 @@
 {
   "name": "attendance-qr-system",
   "version": "1.0.0",
-  "description": "QR-based classroom attendance system with anti-sharing protection, backed by Firebase Firestore",
+  "description": "QR-based classroom attendance system with teacher accounts, per-class rosters, and anti-sharing protection, backed by Firebase Firestore",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -14,7 +14,7 @@
     "dotenv": "^16.4.5",
     "qrcode": "^1.5.3",
     "firebase-admin": "^12.5.0",
-    "geolib": "^3.3.4",
+    "bcryptjs": "^2.4.3",
     "nanoid": "^3.3.7"
   }
 }

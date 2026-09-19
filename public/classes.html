@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Your Classes — Attendance</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0f1220; color: #f0f0f5; margin: 0; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; padding: 24px; box-sizing: border-box;
+  }
+  .topbar { width: 100%; max-width: 440px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .topbar span { color: #9aa0b4; font-size: 0.9rem; }
+  .topbar button { background: transparent; color: #f87171; border: none; cursor: pointer; font-size: 0.85rem; }
+  h2 { margin-top: 0; }
+  .card { background: #1a1e33; border-radius: 16px; padding: 24px; max-width: 440px; width: 100%; margin-bottom: 16px; }
+  input, button {
+    width: 100%; padding: 12px; border-radius: 10px; font-size: 1rem; margin-top: 10px; box-sizing: border-box;
+  }
+  input { border: 1px solid #2a2f4a; background: #12152a; color: #f0f0f5; }
+  button.primary { background: #6366f1; color: #fff; border: none; font-weight: 600; cursor: pointer; }
+  #msg { color: #f87171; font-size: 0.85rem; min-height: 18px; margin-top: 8px; }
+  .class-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px; border-radius: 10px; background: #12152a; margin-top: 10px; cursor: pointer;
+  }
+  .class-item:hover { background: #1e2140; }
+  .class-item .info b { display: block; }
+  .class-item .info span { color: #9aa0b4; font-size: 0.8rem; }
+  .class-item .go { color: #a5b4fc; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span id="whoami"></span>
+    <button onclick="logout()">Log out</button>
+  </div>
+
+  <div class="card">
+    <h2>Add a Class</h2>
+    <input id="subject" placeholder="Subject (e.g. Mathematics)" />
+    <input id="className" placeholder="Class name (e.g. Grade 10 - A)" />
+    <button class="primary" onclick="addClass()">Add Class</button>
+    <div id="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>Your Classes</h2>
+    <div id="classList">Loading…</div>
+  </div>
+
+<script>
+const token = localStorage.getItem('teacherToken');
+const name = localStorage.getItem('teacherName');
+if (!token) window.location.href = '/login.html';
+document.getElementById('whoami').textContent = 'Logged in as ' + (name || '');
+
+function logout() {
+  fetch('/api/auth/logout', { method: 'POST', headers: { 'x-teacher-token': token } });
+  localStorage.removeItem('teacherToken');
+  localStorage.removeItem('teacherName');
+  localStorage.removeItem('selectedClassId');
+  localStorage.removeItem('selectedClassLabel');
+  window.location.href = '/login.html';
+}
+
+async function loadClasses() {
+  const listEl = document.getElementById('classList');
+  try {
+    const res = await fetch('/api/classes', { headers: { 'x-teacher-token': token } });
+    if (res.status === 401) { window.location.href = '/login.html'; return; }
+    const classes = await res.json();
+    listEl.innerHTML = classes.length
+      ? classes.map(c => `
+          <div class="class-item" onclick="selectClass('${c.classId}', '${c.subject.replace(/'/g, "&#39;")}', '${c.className.replace(/'/g, "&#39;")}')">
+            <div class="info"><b>${c.subject}</b><span>${c.className}</span></div>
+            <div class="go">Open →</div>
+          </div>`).join('')
+      : '<div style="color:#9aa0b4;">No classes yet. Add one above.</div>';
+  } catch (e) {
+    listEl.innerHTML = 'Could not load classes.';
+  }
+}
+loadClasses();
+
+async function addClass() {
+  const subject = document.getElementById('subject').value.trim();
+  const className = document.getElementById('className').value.trim();
+  const msg = document.getElementById('msg');
+  if (!subject || !className) {
+    msg.textContent = 'Enter both a subject and a class name.';
+    return;
+  }
+  msg.textContent = 'Adding…';
+  try {
+    const res = await fetch('/api/classes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-teacher-token': token },
+      body: JSON.stringify({ subject, className }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msg.textContent = data.error || 'Could not add class.';
+      return;
+    }
+    msg.textContent = '';
+    document.getElementById('subject').value = '';
+    document.getElementById('className').value = '';
+    loadClasses();
+  } catch (e) {
+    msg.textContent = 'Network error.';
+  }
+}
+
+function selectClass(classId, subject, className) {
+  localStorage.setItem('selectedClassId', classId);
+  localStorage.setItem('selectedClassLabel', subject + ' — ' + className);
+  window.location.href = '/teacher.html';
+}
+</script>
+</body>
+</html>

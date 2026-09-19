@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sign Up — Attendance</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0f1220; color: #f0f0f5; margin: 0; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 20px; box-sizing: border-box;
+  }
+  .card { background: #1a1e33; border-radius: 16px; padding: 32px; max-width: 380px; width: 100%; }
+  h2 { margin-top: 0; }
+  input, button {
+    width: 100%; padding: 12px; border-radius: 10px; font-size: 1rem; margin-top: 10px; box-sizing: border-box;
+  }
+  input { border: 1px solid #2a2f4a; background: #12152a; color: #f0f0f5; }
+  button { background: #6366f1; color: #fff; border: none; font-weight: 600; cursor: pointer; margin-top: 16px; }
+  button:disabled { background: #4b4f6b; cursor: not-allowed; }
+  #msg { color: #f87171; font-size: 0.85rem; min-height: 18px; margin-top: 10px; }
+  .ok { color: #6ee7b7 !important; }
+  .switch { text-align: center; margin-top: 16px; font-size: 0.85rem; color: #9aa0b4; }
+  .switch a { color: #a5b4fc; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>Create Teacher Account</h2>
+    <input id="name" placeholder="Your name" />
+    <input id="email" type="email" placeholder="Email" />
+    <input id="password" type="password" placeholder="Password (min 6 characters)" />
+    <button id="btn" onclick="doSignup()">Sign Up</button>
+    <div id="msg"></div>
+    <div class="switch">Already have an account? <a href="/login.html">Log in</a></div>
+  </div>
+<script>
+async function doSignup() {
+  const name = document.getElementById('name').value.trim();
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('btn');
+  if (!name || !email || !password) {
+    msg.textContent = 'Please fill in all fields.';
+    return;
+  }
+  btn.disabled = true;
+  msg.textContent = 'Creating account…';
+  try {
+    const res = await fetch('/api/auth/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msg.textContent = data.error || 'Signup failed.';
+      btn.disabled = false;
+      return;
+    }
+    msg.textContent = 'Account created! Redirecting to login…';
+    msg.classList.add('ok');
+    setTimeout(() => { window.location.href = '/login.html'; }, 1200);
+  } catch (e) {
+    msg.textContent = 'Network error. Please try again.';
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>

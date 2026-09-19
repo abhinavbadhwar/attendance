@@ -3,12 +3,11 @@ const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
 
+const auth = require('./services/auth');
 const firebase = require('./services/firebase');
 const sessionManager = require('./services/sessionManager');
 
 const app = express();
-// Needed so req.ip reflects the real visitor IP when running behind ngrok /
-// a reverse proxy / hosting platform, instead of the proxy's own IP.
 app.set('trust proxy', true);
 
 app.use(cors());
@@ -18,10 +17,6 @@ app.use(express.static('public'));
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-// --- Network (WiFi) check config ---
-// Comma-separated list of allowed public IPs and/or CIDR ranges, e.g.
-// "103.21.58.10,203.0.113.0/24". Leave ALLOWED_NETWORK_IPS empty to skip this
-// check entirely (useful if your school's IP isn't static).
 const ALLOWED_NETWORK_IPS = (process.env.ALLOWED_NETWORK_IPS || '')
   .split(',')
   .map((s) => s.trim())
@@ -39,7 +34,7 @@ function ipToLong(ip) {
 }
 
 function isIpAllowed(ip) {
-  if (ALLOWED_NETWORK_IPS.length === 0) return true; // check disabled
+  if (ALLOWED_NETWORK_IPS.length === 0) return true;
   const clean = normalizeIp(ip);
   return ALLOWED_NETWORK_IPS.some((entry) => {
     if (entry.includes('/')) {
@@ -56,27 +51,117 @@ function isIpAllowed(ip) {
 }
 
 function todayStr() {
-  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  return new Date().toISOString().slice(0, 10);
 }
 
-// ---------- Roster management ----------
-app.get('/api/roster', async (req, res) => {
+function sessionKey(teacherId, classId) {
+  return `${teacherId}:${classId}`;
+}
+
+// ---------- Auth middleware ----------
+async function requireAuth(req, res, next) {
   try {
-    const roster = await firebase.getRoster();
-    res.json(roster);
+    const token = req.headers['x-teacher-token'];
+    const teacher = await auth.getTeacherFromToken(token);
+    if (!teacher) return res.status(401).json({ error: 'Not logged in.' });
+    req.teacherId = teacher.teacherId;
+    req.teacherName = teacher.name;
+    next();
   } catch (err) {
-    console.error('GET /api/roster failed:', err);
-    res.status(500).json({ error: 'Failed to load roster. Check Firebase credentials.' });
+    console.error('requireAuth failed:', err);
+    res.status(500).json({ error: 'Authentication check failed.' });
+  }
+}
+
+async function requireClass(req, res, next) {
+  try {
+    const classId = req.headers['x-class-id'];
+    if (!classId) return res.status(400).json({ error: 'No class selected.' });
+    const cls = await firebase.getClass(req.teacherId, classId);
+    if (!cls) return res.status(403).json({ error: 'Class not found, or it does not belong to you.' });
+    req.classId = classId;
+    req.classInfo = cls;
+    next();
+  } catch (err) {
+    console.error('requireClass failed:', err);
+    res.status(500).json({ error: 'Class check failed.' });
+  }
+}
+
+// ---------- Auth routes ----------
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    await auth.signup({ name, email, password });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Signup failed.' });
   }
 });
 
-app.post('/api/roster', async (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const result = await auth.login({ email, password });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(401).json({ error: err.message || 'Login failed.' });
+  }
+});
+
+app.post('/api/auth/logout', async (req, res) => {
+  const token = req.headers['x-teacher-token'];
+  await auth.logout(token);
+  res.json({ ok: true });
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ teacherId: req.teacherId, name: req.teacherName });
+});
+
+// ---------- Class management ----------
+app.post('/api/classes', requireAuth, async (req, res) => {
+  try {
+    const { subject, className } = req.body;
+    if (!subject || !className) {
+      return res.status(400).json({ error: 'Subject and class name are both required.' });
+    }
+    const cls = await firebase.createClass(req.teacherId, subject, className);
+    res.json({ ok: true, class: cls });
+  } catch (err) {
+    console.error('POST /api/classes failed:', err);
+    res.status(500).json({ error: 'Failed to create class.' });
+  }
+});
+
+app.get('/api/classes', requireAuth, async (req, res) => {
+  try {
+    const classes = await firebase.getClasses(req.teacherId);
+    res.json(classes);
+  } catch (err) {
+    console.error('GET /api/classes failed:', err);
+    res.status(500).json({ error: 'Failed to load classes.' });
+  }
+});
+
+// ---------- Roster management (teacher-only, scoped to their selected class) ----------
+app.get('/api/roster', requireAuth, requireClass, async (req, res) => {
+  try {
+    const roster = await firebase.getRoster(req.teacherId, req.classId);
+    res.json(roster);
+  } catch (err) {
+    console.error('GET /api/roster failed:', err);
+    res.status(500).json({ error: 'Failed to load roster.' });
+  }
+});
+
+app.post('/api/roster', requireAuth, requireClass, async (req, res) => {
   try {
     const { rollNumber, name } = req.body;
     if (!rollNumber || !name) {
       return res.status(400).json({ error: 'rollNumber and name are required.' });
     }
-    await firebase.addOrUpdateStudent(rollNumber, name);
+    await firebase.addOrUpdateStudent(req.teacherId, req.classId, rollNumber, name);
     res.json({ ok: true });
   } catch (err) {
     console.error('POST /api/roster failed:', err);
@@ -84,9 +169,7 @@ app.post('/api/roster', async (req, res) => {
   }
 });
 
-// Bulk add: body { students: [{rollNumber, name}, ...] }. Adds each independently
-// and reports per-row success/failure so one bad row doesn't hide the rest.
-app.post('/api/roster/bulk', async (req, res) => {
+app.post('/api/roster/bulk', requireAuth, requireClass, async (req, res) => {
   const { students } = req.body;
   if (!Array.isArray(students) || students.length === 0) {
     return res.status(400).json({ error: 'students must be a non-empty array.' });
@@ -101,7 +184,7 @@ app.post('/api/roster/bulk', async (req, res) => {
     }
     try {
       // eslint-disable-next-line no-await-in-loop
-      await firebase.addOrUpdateStudent(rollNumber, name);
+      await firebase.addOrUpdateStudent(req.teacherId, req.classId, rollNumber, name);
       results.push({ rollNumber, name, ok: true });
     } catch (err) {
       console.error('bulk roster add failed for', rollNumber, err);
@@ -111,9 +194,9 @@ app.post('/api/roster/bulk', async (req, res) => {
   res.json({ results });
 });
 
-app.delete('/api/roster/:rollNumber', async (req, res) => {
+app.delete('/api/roster/:rollNumber', requireAuth, requireClass, async (req, res) => {
   try {
-    await firebase.removeStudent(req.params.rollNumber);
+    await firebase.removeStudent(req.teacherId, req.classId, req.params.rollNumber);
     res.json({ ok: true });
   } catch (err) {
     console.error('DELETE /api/roster failed:', err);
@@ -121,104 +204,60 @@ app.delete('/api/roster/:rollNumber', async (req, res) => {
   }
 });
 
-// ---------- Teacher: start (or resume) today's attendance session ----------
-app.post('/api/session/start', async (req, res) => {
+// ---------- Teacher: start (or resume) today's session for their selected class ----------
+app.post('/api/session/start', requireAuth, requireClass, async (req, res) => {
   try {
     const dateStr = todayStr();
-    const { roster, presentRollNumbers, deviceClaims } = await firebase.ensureSessionDoc(dateStr);
+    const { roster, presentRollNumbers, deviceClaims } = await firebase.ensureSessionDoc(
+      req.teacherId,
+      req.classId,
+      dateStr
+    );
     if (roster.length === 0) {
-      return res.status(400).json({
-        error: 'Roster is empty. Add students first (see the "Manage Roster" panel).',
-      });
+      return res.status(400).json({ error: 'Roster is empty. Add students first.' });
     }
-    const sessionId = sessionManager.startSession({ dateStr, roster, presentRollNumbers, deviceClaims });
+    const key = sessionKey(req.teacherId, req.classId);
+    const sessionId = sessionManager.startSession(key, { dateStr, roster, presentRollNumbers, deviceClaims });
     res.json({ sessionId, date: dateStr, studentCount: roster.length });
   } catch (err) {
     console.error('session/start failed:', err);
-    res.status(500).json({ error: 'Failed to start session. Check server logs / Firebase credentials.' });
+    res.status(500).json({ error: 'Failed to start session.' });
   }
 });
 
-// ---------- Teacher: fetch the QR image for the current (static-per-session) token ----------
-app.get('/api/session/qr', async (req, res) => {
-  const status = sessionManager.getStatus();
+app.get('/api/session/qr', requireAuth, requireClass, async (req, res) => {
+  const key = sessionKey(req.teacherId, req.classId);
+  const status = sessionManager.getStatus(key);
   if (!status.active) return res.status(400).json({ error: 'No active session.' });
 
-  const state = sessionManager.getRawState();
-  const attendUrl = `${BASE_URL}/attend.html?session=${state.sessionId}&token=${state.currentToken}`;
-  const qrDataUrl = await QRCode.toDataURL(attendUrl, {
-    margin: 3,
-    width: 400,
-    errorCorrectionLevel: 'H',
-  });
+  const state = sessionManager.getRawState(key);
+  const attendUrl = `${BASE_URL}/attend.html?t=${encodeURIComponent(req.teacherId)}&c=${encodeURIComponent(
+    req.classId
+  )}&session=${state.sessionId}&token=${state.currentToken}`;
+  const qrDataUrl = await QRCode.toDataURL(attendUrl, { margin: 3, width: 400, errorCorrectionLevel: 'H' });
 
   res.json({ qrImage: qrDataUrl, attendUrl, ...status });
 });
 
-// ---------- Teacher: manually regenerate the QR (e.g. if a leak is suspected) ----------
-app.post('/api/session/qr/regenerate', (req, res) => {
-  const status = sessionManager.getStatus();
+app.post('/api/session/qr/regenerate', requireAuth, requireClass, (req, res) => {
+  const key = sessionKey(req.teacherId, req.classId);
+  const status = sessionManager.getStatus(key);
   if (!status.active) return res.status(400).json({ error: 'No active session.' });
-  sessionManager.regenerateToken();
+  sessionManager.rotateToken(key);
   res.json({ ok: true });
 });
 
-// ---------- Teacher: live status ----------
-app.get('/api/session/status', (req, res) => {
-  res.json(sessionManager.getStatus());
+app.get('/api/session/status', requireAuth, requireClass, (req, res) => {
+  const key = sessionKey(req.teacherId, req.classId);
+  res.json(sessionManager.getStatus(key));
 });
 
-// ---------- Public: roster names for the student dropdown ----------
-app.get('/api/roster-lite', (req, res) => {
-  const state = sessionManager.getRawState();
-  res.json(state.roster.map((r) => ({ rollNumber: r.rollNumber, name: r.name })));
-});
-
-// ---------- Student: submit a scan ----------
-app.post('/api/attend', async (req, res) => {
+app.post('/api/session/end', requireAuth, requireClass, async (req, res) => {
   try {
-    const { sessionId, token, rollNumber, deviceId } = req.body;
-
-    // --- Check: network. Must be on the classroom's WiFi (if configured). ---
-    const clientIp = normalizeIp(req.ip);
-    if (!isIpAllowed(clientIp)) {
-      return res.status(403).json({
-        ok: false,
-        reason: 'You must be connected to the classroom WiFi network to mark attendance.',
-      });
-    }
-
-    // --- Checks: session/token validity, roster membership, one-time use, device lock ---
-    const check = sessionManager.validateScan({ sessionId, token, rollNumber, deviceId });
-    if (!check.ok) {
-      // Persist proxy flags immediately so they survive even if the server
-      // restarts before the session is ended.
-      if (check.proxyFlag) {
-        const state = sessionManager.getRawState();
-        await firebase.appendProxyFlag(state.dateStr, check.proxyFlag);
-      }
-      return res.status(400).json({ ok: false, reason: check.reason });
-    }
-
-    // All checks passed -> write to Firestore and lock this roll number + device for today.
-    const state = sessionManager.getRawState();
-    await firebase.markPresent(state.dateStr, check.student.rollNumber, check.student.name);
-    await firebase.recordDeviceClaim(state.dateStr, deviceId, check.student.rollNumber);
-    sessionManager.markScanSuccessful(check.student.rollNumber, deviceId);
-
-    res.json({ ok: true, name: check.student.name });
-  } catch (err) {
-    console.error('POST /api/attend failed:', err);
-    res.status(500).json({ ok: false, reason: 'Server error while marking attendance.' });
-  }
-});
-
-// ---------- Teacher: end session, finalize absentees in Firestore ----------
-app.post('/api/session/end', async (req, res) => {
-  try {
-    const summary = sessionManager.endSession();
+    const key = sessionKey(req.teacherId, req.classId);
+    const summary = sessionManager.endSession(key);
     if (summary.roster.length > 0) {
-      await firebase.finalizeAbsentees(summary.dateStr, summary.roster, summary.presentRollNumbers);
+      await firebase.finalizeAbsentees(req.teacherId, req.classId, summary.dateStr, summary.roster, summary.presentRollNumbers);
     }
     res.json({
       ok: true,
@@ -232,11 +271,57 @@ app.post('/api/session/end', async (req, res) => {
   }
 });
 
+// ---------- Public: student-facing routes (no login -- identified by t/c in the QR link) ----------
+app.get('/api/roster-lite', (req, res) => {
+  const { t: teacherId, c: classId } = req.query;
+  if (!teacherId || !classId) return res.status(400).json({ error: 'Invalid link.' });
+  const key = sessionKey(teacherId, classId);
+  const state = sessionManager.getRawState(key);
+  res.json(state.roster.map((r) => ({ rollNumber: r.rollNumber, name: r.name })));
+});
+
+app.post('/api/attend', async (req, res) => {
+  try {
+    const { teacherId, classId, sessionId, token, rollNumber, deviceId } = req.body;
+    if (!teacherId || !classId) {
+      return res.status(400).json({ ok: false, reason: 'Invalid link.' });
+    }
+
+    const clientIp = normalizeIp(req.ip);
+    if (!isIpAllowed(clientIp)) {
+      return res.status(403).json({
+        ok: false,
+        reason: 'You must be connected to the classroom WiFi network to mark attendance.',
+      });
+    }
+
+    const key = sessionKey(teacherId, classId);
+    const check = sessionManager.validateScan(key, { sessionId, token, rollNumber, deviceId });
+    if (!check.ok) {
+      if (check.proxyFlag) {
+        const state = sessionManager.getRawState(key);
+        await firebase.appendProxyFlag(teacherId, classId, state.dateStr, check.proxyFlag);
+      }
+      return res.status(400).json({ ok: false, reason: check.reason });
+    }
+
+    const state = sessionManager.getRawState(key);
+    await firebase.markPresent(teacherId, classId, state.dateStr, check.student.rollNumber, check.student.name);
+    await firebase.recordDeviceClaim(teacherId, classId, state.dateStr, deviceId, check.student.rollNumber);
+    sessionManager.markScanSuccessful(key, check.student.rollNumber, deviceId);
+
+    res.json({ ok: true, name: check.student.name });
+  } catch (err) {
+    console.error('POST /api/attend failed:', err);
+    res.status(500).json({ ok: false, reason: 'Server error while marking attendance.' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Attendance server running at ${BASE_URL}`);
-  console.log(`Teacher dashboard: ${BASE_URL}/teacher.html`);
+  console.log(`Login page: ${BASE_URL}/login.html`);
   if (ALLOWED_NETWORK_IPS.length === 0) {
-    console.log('Network (WiFi) check: DISABLED (set ALLOWED_NETWORK_IPS in .env to enable)');
+    console.log('Network (WiFi) check: DISABLED');
   } else {
     console.log('Network (WiFi) check: enabled for', ALLOWED_NETWORK_IPS.join(', '));
   }

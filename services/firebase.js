@@ -1,56 +1,60 @@
 /**
- * Firebase Firestore integration.
+ * Class, roster, and attendance data -- all scoped under the teacher who owns
+ * it, so multiple teachers (or one teacher's multiple subjects) never see or
+ * affect each other's data.
  *
  * Collections used:
  *
- *   roster/{rollNumber}
- *     { rollNumber: "101", name: "Aarav Sharma" }
+ *   teachers/{teacherId}/classes/{classId}
+ *     { subject, className, createdAt }
  *
- *   attendance/{YYYY-MM-DD}
+ *   teachers/{teacherId}/classes/{classId}/roster/{rollNumber}
+ *     { rollNumber, name }
+ *
+ *   teachers/{teacherId}/classes/{classId}/attendance/{YYYY-MM-DD}
  *     {
- *       date: "2026-09-18",
- *       records: {
- *         "101": { name: "Aarav Sharma", status: "Present", markedAt: <timestamp> },
- *         "102": { name: "Diya Patel",  status: "Absent",  markedAt: null }
- *       },
- *       deviceClaims: { "<deviceId>": "101" },   // which roll number each phone has already claimed today
+ *       date, records: { [rollNumber]: { name, status, markedAt } },
+ *       deviceClaims: { [deviceId]: rollNumber },
  *       proxyFlags: [ { triedRollNumber, triedName, alreadyClaimedRollNumber, alreadyClaimedName, timestamp } ]
  *     }
- *
- * Both "who's already present" and "which phone already claimed someone" are
- * persisted here, not just held in memory -- so restarting a session mid-day,
- * or the server briefly going to sleep and waking back up (normal on a free
- * hosting tier), can never silently reset those protections.
  */
 
-const admin = require('firebase-admin');
-const path = require('path');
+const { getDb, admin } = require('./db');
 
-let db = null;
+function classRef(teacherId, classId) {
+  return getDb().collection('teachers').doc(teacherId).collection('classes').doc(classId);
+}
 
-function getDb() {
-  if (db) return db;
+/** Creates a new class for this teacher. Returns { classId, subject, className }. */
+async function createClass(teacherId, subject, className) {
+  const database = getDb();
+  const ref = database.collection('teachers').doc(teacherId).collection('classes').doc();
+  const data = {
+    subject: String(subject).trim(),
+    className: String(className).trim(),
+    createdAt: new Date().toISOString(),
+  };
+  await ref.set(data);
+  return { classId: ref.id, ...data };
+}
 
-  let serviceAccount;
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-  } else {
-    const keyPath = process.env.FIREBASE_SERVICE_ACCOUNT_KEY_PATH || './firebase-service-account.json';
-    // eslint-disable-next-line global-require, import/no-dynamic-require
-    serviceAccount = require(path.resolve(process.cwd(), keyPath));
-  }
+/** Lists all classes belonging to this teacher. */
+async function getClasses(teacherId) {
+  const database = getDb();
+  const snap = await database.collection('teachers').doc(teacherId).collection('classes').get();
+  return snap.docs.map((doc) => ({ classId: doc.id, ...doc.data() }));
+}
 
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
-  db = admin.firestore();
-  return db;
+/** Returns { subject, className } if this class exists and belongs to this teacher, else null. */
+async function getClass(teacherId, classId) {
+  const snap = await classRef(teacherId, classId).get();
+  if (!snap.exists) return null;
+  return snap.data();
 }
 
 /** Returns the full class roster: [{ rollNumber, name }], sorted by roll number. */
-async function getRoster() {
-  const database = getDb();
-  const snap = await database.collection('roster').get();
+async function getRoster(teacherId, classId) {
+  const snap = await classRef(teacherId, classId).collection('roster').get();
   return snap.docs
     .map((doc) => doc.data())
     .map((r) => ({ rollNumber: String(r.rollNumber), name: r.name }))
@@ -58,31 +62,26 @@ async function getRoster() {
 }
 
 /** Adds a new student or updates an existing one (same roll number = update). */
-async function addOrUpdateStudent(rollNumber, name) {
-  const database = getDb();
-  await database
+async function addOrUpdateStudent(teacherId, classId, rollNumber, name) {
+  await classRef(teacherId, classId)
     .collection('roster')
     .doc(String(rollNumber))
     .set({ rollNumber: String(rollNumber), name: String(name) });
 }
 
 /** Removes a student from the roster entirely. */
-async function removeStudent(rollNumber) {
-  const database = getDb();
-  await database.collection('roster').doc(String(rollNumber)).delete();
+async function removeStudent(teacherId, classId, rollNumber) {
+  await classRef(teacherId, classId).collection('roster').doc(String(rollNumber)).delete();
 }
 
 /**
- * Ensures today's attendance document exists, pre-filled with every roster
- * student marked "Absent" (existing Present/Absent records are preserved if
- * the doc already exists from earlier today).
- * Returns { dateStr, roster, presentRollNumbers, deviceClaims } so the live
- * session can be correctly re-seeded even after a restart.
+ * Ensures today's attendance document exists for this class, pre-filled with
+ * every roster student marked "Absent" (existing records for today are kept).
+ * Returns { dateStr, roster, presentRollNumbers, deviceClaims }.
  */
-async function ensureSessionDoc(dateStr) {
-  const database = getDb();
-  const roster = await getRoster();
-  const ref = database.collection('attendance').doc(dateStr);
+async function ensureSessionDoc(teacherId, classId, dateStr) {
+  const roster = await getRoster(teacherId, classId);
+  const ref = classRef(teacherId, classId).collection('attendance').doc(dateStr);
   const existing = await ref.get();
   const existingData = existing.exists ? existing.data() : {};
   const existingRecords = existingData.records || {};
@@ -104,9 +103,8 @@ async function ensureSessionDoc(dateStr) {
 }
 
 /** Marks a single student Present for the given date. */
-async function markPresent(dateStr, rollNumber, name) {
-  const database = getDb();
-  const ref = database.collection('attendance').doc(dateStr);
+async function markPresent(teacherId, classId, dateStr, rollNumber, name) {
+  const ref = classRef(teacherId, classId).collection('attendance').doc(dateStr);
   await ref.set(
     {
       records: {
@@ -122,32 +120,23 @@ async function markPresent(dateStr, rollNumber, name) {
 }
 
 /** Persists that this phone (deviceId) has now claimed this roll number today. */
-async function recordDeviceClaim(dateStr, deviceId, rollNumber) {
-  const database = getDb();
-  const ref = database.collection('attendance').doc(dateStr);
-  await ref.set(
-    { deviceClaims: { [deviceId]: rollNumber } },
-    { merge: true }
-  );
+async function recordDeviceClaim(teacherId, classId, dateStr, deviceId, rollNumber) {
+  const ref = classRef(teacherId, classId).collection('attendance').doc(dateStr);
+  await ref.set({ deviceClaims: { [deviceId]: rollNumber } }, { merge: true });
 }
 
 /** Persists a new proxy-attempt flag immediately (not just at session end). */
-async function appendProxyFlag(dateStr, flag) {
-  const database = getDb();
-  const ref = database.collection('attendance').doc(dateStr);
-  await ref.set(
-    { proxyFlags: admin.firestore.FieldValue.arrayUnion(flag) },
-    { merge: true }
-  );
+async function appendProxyFlag(teacherId, classId, dateStr, flag) {
+  const ref = classRef(teacherId, classId).collection('attendance').doc(dateStr);
+  await ref.set({ proxyFlags: admin.firestore.FieldValue.arrayUnion(flag) }, { merge: true });
 }
 
 /**
  * Finalizes a session: any roster student not in `presentRollNumbers` is
- * explicitly written as "Absent" for this date (covers students who never scanned).
+ * explicitly written as "Absent" for this date.
  */
-async function finalizeAbsentees(dateStr, roster, presentRollNumbers) {
-  const database = getDb();
-  const ref = database.collection('attendance').doc(dateStr);
+async function finalizeAbsentees(teacherId, classId, dateStr, roster, presentRollNumbers) {
+  const ref = classRef(teacherId, classId).collection('attendance').doc(dateStr);
   const updates = {};
   for (const student of roster) {
     if (!presentRollNumbers.has(student.rollNumber)) {
@@ -163,6 +152,9 @@ async function finalizeAbsentees(dateStr, roster, presentRollNumbers) {
 }
 
 module.exports = {
+  createClass,
+  getClasses,
+  getClass,
   getRoster,
   addOrUpdateStudent,
   removeStudent,

@@ -12,6 +12,9 @@
     display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 24px;
     box-sizing: border-box;
   }
+  .topbar { width: 100%; max-width: 440px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .topbar span { color: #9aa0b4; font-size: 0.85rem; }
+  .topbar a { color: #a5b4fc; font-size: 0.85rem; text-decoration: none; margin-left: 12px; }
   h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 4px; }
   .sub { color: #9aa0b4; margin-bottom: 20px; font-size: 0.9rem; }
   .card {
@@ -73,6 +76,10 @@
 </style>
 </head>
 <body>
+  <div class="topbar">
+    <span id="classLabel"></span>
+    <span><a href="/classes.html">Switch class</a><a href="#" onclick="logout()">Log out</a></span>
+  </div>
   <h1>Live Attendance</h1>
   <div class="sub">Attendance requires being on the classroom WiFi and physically in the room</div>
 
@@ -128,6 +135,26 @@
   </div>
 
 <script>
+const token = localStorage.getItem('teacherToken');
+const classId = localStorage.getItem('selectedClassId');
+const classLabel = localStorage.getItem('selectedClassLabel');
+if (!token) window.location.href = '/login.html';
+if (!classId) window.location.href = '/classes.html';
+document.getElementById('classLabel').textContent = classLabel || '';
+
+function authHeaders(extra) {
+  return Object.assign({ 'x-teacher-token': token, 'x-class-id': classId }, extra || {});
+}
+
+function logout() {
+  fetch('/api/auth/logout', { method: 'POST', headers: authHeaders() });
+  localStorage.removeItem('teacherToken');
+  localStorage.removeItem('teacherName');
+  localStorage.removeItem('selectedClassId');
+  localStorage.removeItem('selectedClassLabel');
+  window.location.href = '/login.html';
+}
+
 let statusPoll = null;
 
 // ---------- Roster tabs ----------
@@ -143,7 +170,8 @@ async function loadRosterPanel() {
   const listEl = document.getElementById('rosterList');
   listEl.innerHTML = 'Loading…';
   try {
-    const res = await fetch('/api/roster');
+    const res = await fetch('/api/roster', { headers: authHeaders() });
+    if (res.status === 401) { window.location.href = '/login.html'; return; }
     const roster = await res.json();
     if (!res.ok) {
       listEl.innerHTML = '';
@@ -175,7 +203,7 @@ async function addStudent() {
   try {
     const res = await fetch('/api/roster', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ rollNumber, name }),
     });
     const data = await res.json();
@@ -188,7 +216,7 @@ async function addStudent() {
     document.getElementById('newName').value = '';
     loadRosterPanel();
   } catch (e) {
-    msgEl.textContent = 'Network error — check the server is running and Firebase is configured.';
+    msgEl.textContent = 'Network error.';
   }
 }
 
@@ -208,7 +236,7 @@ async function addBulk() {
   try {
     const res = await fetch('/api/roster/bulk', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ students }),
     });
     const data = await res.json();
@@ -228,12 +256,12 @@ async function addBulk() {
     }
     loadRosterPanel();
   } catch (e) {
-    msgEl.textContent = 'Network error — check the server is running and Firebase is configured.';
+    msgEl.textContent = 'Network error.';
   }
 }
 
 async function removeStudent(rollNumber) {
-  await fetch('/api/roster/' + encodeURIComponent(rollNumber), { method: 'DELETE' });
+  await fetch('/api/roster/' + encodeURIComponent(rollNumber), { method: 'DELETE', headers: authHeaders() });
   loadRosterPanel();
 }
 
@@ -244,7 +272,7 @@ document.getElementById('rosterPanel').addEventListener('toggle', (e) => {
 // ---------- Session ----------
 async function startSession() {
   document.getElementById('msg').textContent = '';
-  const res = await fetch('/api/session/start', { method: 'POST' });
+  const res = await fetch('/api/session/start', { method: 'POST', headers: authHeaders() });
   const data = await res.json();
   if (!res.ok) {
     document.getElementById('msg').textContent = data.error || 'Could not start session.';
@@ -259,7 +287,7 @@ async function startSession() {
 }
 
 async function loadQr() {
-  const res = await fetch('/api/session/qr');
+  const res = await fetch('/api/session/qr', { headers: authHeaders() });
   if (!res.ok) return;
   const data = await res.json();
   document.getElementById('qrImg').src = data.qrImage;
@@ -267,9 +295,14 @@ async function loadQr() {
 }
 
 async function refreshStatus() {
-  const res = await fetch('/api/session/status');
+  const res = await fetch('/api/session/status', { headers: authHeaders() });
   if (!res.ok) return;
-  applyStatus(await res.json());
+  const data = await res.json();
+  applyStatus(data);
+  const ageSec = data.tokenAgeMs != null ? Math.floor(data.tokenAgeMs / 1000) : null;
+  if (ageSec != null && data.rotateMs && ageSec >= Math.floor(data.rotateMs / 1000)) {
+    loadQr();
+  }
 }
 
 function applyStatus(data) {
@@ -289,13 +322,13 @@ function applyStatus(data) {
 }
 
 async function regenerateQr() {
-  await fetch('/api/session/qr/regenerate', { method: 'POST' });
+  await fetch('/api/session/qr/regenerate', { method: 'POST', headers: authHeaders() });
   await loadQr();
 }
 
 async function endSession() {
   clearInterval(statusPoll);
-  const res = await fetch('/api/session/end', { method: 'POST' });
+  const res = await fetch('/api/session/end', { method: 'POST', headers: authHeaders() });
   const data = await res.json();
   document.getElementById('live').style.display = 'none';
   document.getElementById('idle').style.display = 'block';
